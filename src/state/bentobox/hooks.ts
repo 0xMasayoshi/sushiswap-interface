@@ -1,7 +1,6 @@
-import { Token, WNATIVE } from '@sushiswap/sdk'
+import { JSBI, Currency, WNATIVE } from '@sushiswap/sdk'
 import { useBentoBoxContract, useBoringHelperContract, useContract } from '../../hooks/useContract'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-
 import { BigNumber } from '@ethersproject/bignumber'
 import ERC20_ABI from '../../constants/abis/erc20.json'
 import { KASHI_ADDRESS } from '../../constants/kashi'
@@ -14,8 +13,11 @@ import { getAddress } from '@ethersproject/address'
 import { toAmount } from '../../functions/bentobox'
 import { useActiveWeb3React } from '../../hooks/useActiveWeb3React'
 import { useAllTokens } from '../../hooks/Tokens'
-import { useSingleCallResult } from '../multicall/hooks'
+import { useMultipleContractSingleData, useSingleCallResult, useSingleContractMultipleData } from '../multicall/hooks'
 import useTransactionStatus from '../../hooks/useTransactionStatus'
+import ERC20_INTERFACE from '../../constants/abis/erc20'
+import { useETHBalances } from '../wallet/hooks'
+import { PairState, useV2Pairs } from '../../hooks/useV2Pairs'
 
 export interface BentoBalance {
   address: string
@@ -31,54 +33,97 @@ export interface BentoBalance {
 export function useBentoBalances(): BentoBalance[] {
   const { chainId, account } = useActiveWeb3React()
 
-  const boringHelperContract = useBoringHelperContract()
+  const bentoBoxContract = useBentoBoxContract()
 
   const tokens = useAllTokens()
 
-  const weth = WNATIVE[chainId].address
+  const weth = WNATIVE[chainId]
 
   const tokenAddresses = Object.keys(tokens)
 
-  const balanceData = useSingleCallResult(boringHelperContract, 'getBalances', [account, tokenAddresses])
+  const ethBalances = useETHBalances([account])
 
-  const uiData = useSingleCallResult(boringHelperContract, 'getUIInfo', [
-    account,
-    [],
-    USDC[chainId].address,
-    [KASHI_ADDRESS[chainId]],
-  ])
+  const balances = useMultipleContractSingleData(tokenAddresses, ERC20_INTERFACE, 'balanceOf', [account])
 
-  // IERC20 token = addresses[i];
-  // balances[i].totalSupply = token.totalSupply();
-  // balances[i].token = token;
-  // balances[i].balance = token.balanceOf(who);
-  // balances[i].bentoAllowance = token.allowance(who, address(bentoBox));
-  // balances[i].nonce = token.nonces(who);
-  // balances[i].bentoBalance = bentoBox.balanceOf(token, who);
-  // (balances[i].bentoAmount, balances[i].bentoShare) = bentoBox.totals(token);
-  // balances[i].rate = getETHRate(token);
+  const bentoBalances = useSingleContractMultipleData(
+    bentoBoxContract,
+    'balanceOf',
+    tokenAddresses.map((token) => [token, account])
+  )
+
+  const bentoTotals = useSingleContractMultipleData(
+    bentoBoxContract,
+    'totals',
+    tokenAddresses.map((token) => [token])
+  )
+
+  const currencies: [Currency, Currency][] = useMemo(
+    () => tokenAddresses.map((tokenAddress) => [tokens[tokenAddress], weth]),
+    [tokens, tokenAddresses, weth]
+  )
+
+  const pairs = useV2Pairs(currencies)
+
+  const rates: BigNumber[] = useMemo(
+    () =>
+      tokenAddresses.map((tokenAddress, i) => {
+        const [pairState, pair] = pairs[i]
+        if (tokenAddress === weth.address) {
+          return BigNumber.from((1e18).toString())
+        } else if (pairState !== PairState.EXISTS) {
+          return BigNumber.from('0')
+        } else {
+          if (pair.token0.address === weth.address) {
+            return BigNumber.from(
+              pair.reserve1.multiply(JSBI.BigInt((1e18).toString())).divide(pair.reserve0).quotient.toString()
+            )
+          } else {
+            return BigNumber.from(
+              pair.reserve0.multiply(JSBI.BigInt((1e18).toString())).divide(pair.reserve1).quotient.toString()
+            )
+          }
+        }
+      }),
+    [tokenAddresses, pairs, weth.address]
+  )
 
   return useMemo(() => {
-    if (
-      uiData.loading ||
-      balanceData.loading ||
-      uiData.error ||
-      balanceData.error ||
-      !uiData.result ||
-      !balanceData.result
-    )
-      return []
+    for (let i = 0; i < tokenAddresses.length; ++i) {
+      if (
+        !rates ||
+        balances[i].loading ||
+        balances[i].error ||
+        !balances[i].result ||
+        bentoBalances[i].loading ||
+        bentoBalances[i].error ||
+        !bentoBalances[i].result ||
+        bentoTotals[i].loading ||
+        bentoTotals[i].error ||
+        !bentoTotals[i].result
+      ) {
+        return []
+      }
+    }
+
+    const usdcRate = rates[tokenAddresses.indexOf(USDC[chainId].address)]
+    const ethBalance = BigNumber.from(ethBalances[account].quotient.toString())
+
     return tokenAddresses
       .map((key: string, i: number) => {
         const token = tokens[key]
+        const { result: balance } = balances[i]
+        const { result: bentoBalance } = bentoBalances[i]
+        const { result: bentoTotal } = bentoTotals[i]
 
-        const usd = e10(token.decimals).mulDiv(uiData.result[0].ethRate, balanceData.result[0][i].rate)
+        const usd = e10(token.decimals).mulDiv(usdcRate, rates[i])
 
         const full = {
           ...token,
-          ...balanceData.result[0][i],
+          bentoAmount: bentoTotal[0],
+          bentoShare: bentoTotal[1],
           usd,
         }
+
         return {
           ...token,
           usd,
@@ -86,27 +131,14 @@ export function useBentoBalances(): BentoBalance[] {
           name: token.name,
           symbol: token.symbol,
           decimals: token.decimals,
-          balance: token.address === weth ? uiData.result[0].ethBalance : balanceData.result[0][i].balance,
-          bentoBalance: balanceData.result[0][i].bentoBalance,
-          wallet: easyAmount(
-            token.address === weth ? uiData.result[0].ethBalance : balanceData.result[0][i].balance,
-            full
-          ),
-          bento: easyAmount(toAmount(full, balanceData.result[0][i].bentoBalance), full),
+          balance: token.address === weth.address ? ethBalance.add(balance[0]) : balance[0],
+          bentoBalance: bentoBalance[0],
+          wallet: easyAmount(token.address === weth.address ? ethBalance.add(balance[0]) : balance[0], full),
+          bento: easyAmount(toAmount(full, bentoBalance[0]), full),
         }
       })
       .filter((token) => token.balance.gt('0') || token.bentoBalance.gt('0'))
-  }, [
-    uiData.loading,
-    uiData.error,
-    uiData.result,
-    balanceData.loading,
-    balanceData.error,
-    balanceData.result,
-    tokenAddresses,
-    tokens,
-    weth,
-  ])
+  }, [tokens, tokenAddresses, rates, balances, bentoBalances, bentoTotals, weth.address, ethBalances, account, chainId])
 }
 
 export function useBentoBalance(tokenAddress: string): {
