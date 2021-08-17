@@ -1,5 +1,5 @@
-import { JSBI, Token, WNATIVE, CurrencyAmount, Currency } from '@sushiswap/sdk'
-import { useBentoBoxContract, useBoringHelperContract, useContract } from '../../hooks/useContract'
+import { JSBI, CurrencyAmount, Currency } from '@sushiswap/sdk'
+import { useBentoBoxContract, useContract } from '../../hooks/useContract'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { BigNumber } from '@ethersproject/bignumber'
 import ERC20_ABI from '../../constants/abis/erc20.json'
@@ -11,11 +11,10 @@ import { easyAmount } from '../../functions/kashi'
 import { getAddress } from '@ethersproject/address'
 import { toAmount } from '../../functions/bentobox'
 import { useActiveWeb3React } from '../../hooks/useActiveWeb3React'
-import { useAllTokens } from '../../hooks/Tokens'
+import { useAllTokens, useToken } from '../../hooks/Tokens'
 import { useMultipleContractSingleData, useSingleCallResult, useSingleContractMultipleData } from '../multicall/hooks'
 import useTransactionStatus from '../../hooks/useTransactionStatus'
 import ERC20_INTERFACE from '../../constants/abis/erc20'
-import { useETHBalances } from '../wallet/hooks'
 
 export interface BentoBalance {
   token: any
@@ -24,17 +23,13 @@ export interface BentoBalance {
 }
 
 export function useBentoBalances(): BentoBalance[] {
-  const { chainId, account } = useActiveWeb3React()
+  const { account } = useActiveWeb3React()
 
   const bentoBoxContract = useBentoBoxContract()
 
   const tokens = useAllTokens()
 
-  const weth = WNATIVE[chainId].address
-
   const tokenAddresses = Object.keys(tokens)
-
-  const ethBalances = useETHBalances([account])
 
   const balances = useMultipleContractSingleData(tokenAddresses, ERC20_INTERFACE, 'balanceOf', [account])
 
@@ -67,18 +62,15 @@ export function useBentoBalances(): BentoBalance[] {
       }
     }
 
-    const ethBalance = BigNumber.from(ethBalances[account].quotient.toString())
-
     return tokenAddresses
       .map((key: string, i: number) => {
         const token = tokens[key]
-        const { result: balance } = balances[i]
-        const { result: bentoBalance } = bentoBalances[i]
-        const { result: bentoTotal } = bentoTotals[i]
 
-        // const wallet = token.address === weth.address ? ethBalance.add(balance[0]) : balance[0]
-        const wallet = balance[0]
-        const bento = toAmount({ bentoAmount: bentoTotal[0], bentoShare: bentoTotal[1] }, bentoBalance[0])
+        const bentoBalance = bentoBalances[i].result[0]
+        const bentoAmount = bentoTotals[i].result[0]
+        const bentoShare = bentoTotals[i].result[1]
+        const bento = toAmount({ bentoAmount, bentoShare }, bentoBalance)
+        const wallet = balances[i].result[0]
 
         return {
           token,
@@ -87,7 +79,7 @@ export function useBentoBalances(): BentoBalance[] {
         }
       })
       .filter((token) => token.wallet.greaterThan('0') || token.bento.greaterThan('0'))
-  }, [ethBalances, account, tokenAddresses, balances, bentoBalances, bentoTotals, tokens])
+  }, [tokenAddresses, balances, bentoBalances, bentoTotals, tokens])
 }
 
 export function useBentoBalance(tokenAddress: string): {
@@ -96,38 +88,34 @@ export function useBentoBalance(tokenAddress: string): {
 } {
   const { account } = useActiveWeb3React()
 
-  const boringHelperContract = useBoringHelperContract()
+  const token = useToken(tokenAddress)
+
   const bentoBoxContract = useBentoBoxContract()
-  const tokenAddressChecksum = getAddress(tokenAddress)
-  const tokenContract = useContract(tokenAddressChecksum ? tokenAddressChecksum : undefined, ERC20_ABI)
+
+  const tokenContract = useContract(token?.address, ERC20_ABI)
 
   const currentTransactionStatus = useTransactionStatus()
 
   const [balance, setBalance] = useState<any>()
 
-  // const balanceData = useSingleCallResult(boringHelperContract, 'getBalances', [account, tokenAddresses])
-
   const fetchBentoBalance = useCallback(async () => {
-    const balances = await boringHelperContract?.getBalances(account, [tokenAddressChecksum])
-    const decimals = await tokenContract?.decimals()
+    const balance = await bentoBoxContract.balanceOf(token.address, account)
+    const totals = await bentoBoxContract.totals(token.address)
+    const decimals = await tokenContract.decimals()
 
-    const amount = BigNumber.from(balances[0].bentoShare).isZero()
-      ? BigNumber.from(0)
-      : BigNumber.from(balances[0].bentoBalance)
-          .mul(BigNumber.from(balances[0].bentoAmount))
-          .div(BigNumber.from(balances[0].bentoShare))
+    const amount = toAmount({ bentoAmount: totals[0], bentoShare: totals[1] }, balance)
 
     setBalance({
       value: amount,
       decimals: decimals,
     })
-  }, [account, tokenAddressChecksum, tokenContract, boringHelperContract])
+  }, [account, token, bentoBoxContract, tokenContract])
 
   useEffect(() => {
-    if (account && bentoBoxContract && boringHelperContract && tokenContract) {
+    if (account && token) {
       fetchBentoBalance()
     }
-  }, [account, bentoBoxContract, currentTransactionStatus, fetchBentoBalance, tokenContract, boringHelperContract])
+  }, [account, token, currentTransactionStatus, fetchBentoBalance])
 
   return balance
 }
