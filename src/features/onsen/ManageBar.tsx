@@ -159,7 +159,11 @@ const ManageBar = ({ farm }) => {
                   ? setDepositValue(balance.multiply(multipler).divide(100).toExact())
                   : setWithdrawValue(stakedAmount.multiply(multipler).divide(100).toExact())
               }}
-              className={classNames('text-md', toggle ? 'focus:ring-blue' : 'focus:ring-pink')}
+              className={classNames(
+                'text-md',
+                toggle ? 'focus:ring-blue' : 'focus:ring-pink',
+                multipler === '25' || multipler === '75' ? 'hidden sm:block' : ''
+              )}
             >
               {multipler === '100' ? 'MAX' : multipler + '%'}
             </Button>
